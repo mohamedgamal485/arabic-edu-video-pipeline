@@ -17,7 +17,7 @@ modes:
 services:
   text: "gemini-4-hydrogen / gemini-3.6-flash / gemini-3.5-flash-lite (free tier, automatic fallback)"
   tts: "gemini-3.8-flash-tts (ar-eg-tutor-5, user-confirmed, free tier)"
-  images: "cloudflare-workers-ai @cf/black-forest-labs/flux-1-schnell"
+  images: "cloudflare-workers-ai @cf/black-forest-labs/flux-1-schnell (steps=8, photorealistic documentary prompts)"
   asr: "cloudflare-whisper-large-v3-turbo (preferred), groq-whisper (free fallback)"
   stock: ["pexels", "pixabay", "wikimedia-commons"]
   render: "github-actions ubuntu-latest + ffmpeg"
@@ -28,6 +28,10 @@ preflight:
   cloudflare_neuron_budget_per_video: 7000
   gemini_tts_requests_per_video: 3
   tts_requests_are_per_scene: true
+  max_tts_requests_per_video: 10
+  target_seconds_default: 90
+  target_seconds_range: [45, 180]
+  duration_tolerance_percent: 15
   max_videos_per_run: 4
   abort_if_unknown_quota: true
   no_paid_fallback: true

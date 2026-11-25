@@ -18,6 +18,9 @@ brand:
     body: "Tajawal"
     fallback: "Noto Sans Arabic"
   logo_concept: "دائرة بلون أساسي بداخلها حرف ع بخط Cairo وخط ذهبي رفيع؛ تُنشأ كملف متجه لاحقاً"
+  visual_style: "photorealistic documentary stills, natural light, high detail; no cartoon, no illustration, no painting"
+  caption_style: "clean Egyptian Arabic without harakat or tatweel, Noto Sans Arabic, white with black outline"
+  default_target_seconds: 90
 
 intro:
   seconds: 2
