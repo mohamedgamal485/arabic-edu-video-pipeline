@@ -1,0 +1,78 @@
+name: Media smoke test (Egyptian TTS + image)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  media:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure tools
+        run: |
+          command -v jq >/dev/null 2>&1 || { sudo apt-get update -qq; sudo apt-get install -y -qq jq; }
+          command -v ffmpeg >/dev/null 2>&1 || { sudo apt-get update -qq; sudo apt-get install -y -qq ffmpeg; }
+          jq --version
+          ffmpeg -version | head -n 1
+
+      - name: Egyptian Arabic TTS
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p out
+          cat > tts_request.json <<'JSON'
+          {
+            "model": "gemini-3.8-flash-tts",
+            "input": [{
+              "type": "user_input",
+              "content": [{
+                "type": "text",
+                "text": "الأهرامات من أهم المعالم في مصر، وبيزورها آلاف الناس كل سنة.",
+                "annotations": [{
+                  "type": "speech_metadata",
+                  "style": "warm and friendly"
+                }]
+              }]
+            }],
+            "response_format": { "type": "audio" },
+            "generation_config": { "speech_config": [ { "voice": "Kore" } ] }
+          }
+          JSON
+          code=$(curl -sS -o tts_response.json -w "%{http_code}" \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+            -H "x-goog-api-key: $GEMINI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @tts_request.json)
+          echo "TTS HTTP: $code"
+          [ "$code" = "200" ] || { cat tts_response.json; exit 1; }
+          jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data' tts_response.json | base64 --decode > out/narration.wav
+          ffprobe -v error -show_entries format=duration,size -of default=nw=1 out/narration.wav
+
+      - name: Cloudflare image
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cat > image_request.json <<'JSON'
+          { "prompt": "clean flat educational illustration of the Giza pyramids at sunset, warm colors, no text", "steps": 4 }
+          JSON
+          code=$(curl -sS -o image_response.json -w "%{http_code}" \
+            -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/@cf/black-forest-labs/flux-1-schnell" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @image_request.json)
+          echo "Image HTTP: $code"
+          [ "$code" = "200" ] || { cat image_response.json; exit 1; }
+          jq -r '.result.image' image_response.json | base64 --decode > out/scene.jpg
+          file out/scene.jpg
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-smoke
+          path: out/*
+          retention-days: 1
