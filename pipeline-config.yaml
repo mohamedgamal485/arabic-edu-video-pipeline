@@ -7,8 +7,12 @@ output_dir: "C:/Users/HP/OneDrive/Desktop/videos AI"
 local_role: "download_final_mp4_only"
 
 modes:
-  A_topic_only: ["research", "fact_check", "script", "storyboard"]
-  B_existing_script: ["review", "fact_check", "improve", "storyboard"]
+  A_topic_only:
+    workflow: ".github/workflows/full-pipeline.yml"
+    steps: ["research", "fact_check", "script", "storyboard", "tts", "images", "render", "qc"]
+  B_existing_script:
+    workflow: ".github/workflows/mode-b.yml"
+    steps: ["review", "fact_check", "improve", "storyboard", "qc_auto_fix"]
 
 services:
   text: "gemini-4-hydrogen / gemini-3.6-flash / gemini-3.5-flash-lite (free tier, automatic fallback)"
