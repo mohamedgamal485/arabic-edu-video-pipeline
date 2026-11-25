@@ -1,0 +1,245 @@
+name: Mode B - existing script review and storyboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      existing_script:
+        description: "النص الموجود للت review والتحسين (عربي)"
+        required: true
+        default: "الأهرامات اتبنت بالعبيد، واستخدموا الرفع بالحبال بس."
+      scenes:
+        description: "عدد المشاهد (2-4)"
+        required: true
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install cloud tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          jq --version
+
+      - name: Preflight Gemini free tier
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "ABORT: missing GEMINI_API_KEY"
+            exit 1
+          fi
+          echo "PRESENT: GEMINI_API_KEY"
+          echo "SPEND_LIMIT_USD=0"
+          echo "PAID_FALLBACK=false"
+          echo "NO_LOCAL_AI_OR_RENDER=true"
+
+      - name: Choose free Gemini text model
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p out
+          code=$(curl -sS -o models.json -w "%{http_code}" \
+            -H "x-goog-api-key: $GEMINI_API_KEY" \
+            "https://generativelanguage.googleapis.com/v1beta/models")
+          [ "$code" = "200" ] || { cat models.json; exit 1; }
+          : > text_models.txt
+          for m in gemini-4-hydrogen gemini-3.6-flash gemini-3.5-flash-lite gemini-3.8-flash gemini-flash-latest; do
+            if jq -e --arg m "models/$m" '.models[]? | select(.name==$m)' models.json >/dev/null; then
+              echo "$m" >> text_models.txt
+            fi
+          done
+          if [ ! -s text_models.txt ]; then
+            echo "ABORT: no allowed free text model found"
+            jq -r '.models[]?.name' models.json | head -n 40
+            exit 1
+          fi
+          echo "Text models available:"
+          cat text_models.txt
+
+      - name: Review and improve script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SCRIPT: ${{ github.event.inputs.existing_script }}
+          SCENES: ${{ github.event.inputs.scenes }}
+        run: |
+          for v in SCRIPT SCENES; do
+            eval "val=\$$v"
+            [ -n "$val" ] || { echo "ABORT: empty $v"; exit 1; }
+          done
+          case "$SCENES" in ''|*[!0-9]*) echo "ABORT: scenes must be an integer"; exit 1 ;; esac
+          if [ "$SCENES" -lt 2 ] || [ "$SCENES" -gt 4 ]; then
+            echo "ABORT: scenes must be between 2 and 4"
+            exit 1
+          fi
+
+          prompt="أنت محرر تعليمي ومُدقّق معلومات لقناة مصرية. راجع النص ده: $SCRIPT. المطلوب: (1) صحّح أي معلومة غير دقيقة أو غير مؤكدة، وما تدّعيش مصادر مش موجودة؛ (2) اكتب صيغة مصرية طبيعية محسّنة بجمل قصيرة، من غير فصحى تقيلة ومن غير أي موسيقى أو غناء؛ (3) قسّم النص المحسّن إلى $SCENES مشهد بالظبط، كل مشهد جملة أو جملتان تُقرأ في 6 لحد 12 ثانية؛ (4) اكتب وصف صورة تعليمية بالإنجليزية لكل مشهد، بدون أي نص داخل الصورة. ارجع JSON فقط بالشكل ده: {\"facts\":[\"حقيقة مؤكدة\"],\"uncertainties\":[{\"claim\":\"ادعاء محتاج تدقيق\",\"reason\":\"ليه غير مؤكد\",\"check_suggestion\":\"إزاي نتأكد\"}],\"improved_script\":\"النص المصري المحسّن\",\"scenes\":[{\"text\":\"نص المشهد\",\"image_prompt\":\"English educational image prompt, no text\"}]}. لازم عدد العناصر في scenes يساوي $SCENES بالظبط."
+
+          ok=0
+          while IFS= read -r model; do
+            [ -n "$model" ] || continue
+            jq -n --arg model "$model" --arg prompt "$prompt" \
+              '{model:$model,input:[{type:"user_input",content:[{type:"text",text:$prompt}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{facts:{type:"array",items:{type:"string"}},uncertainties:{type:"array",items:{type:"object",properties:{claim:{type:"string"},reason:{type:"string"},check_suggestion:{type:"string"}},required:["claim","reason","check_suggestion"]}},improved_script:{type:"string"},scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["facts","uncertainties","improved_script","scenes"]}},store:false}' \
+              > review_request.json
+            attempt=1
+            while [ "$attempt" -le 2 ]; do
+              code=$(curl -sS -o review_response.json -w "%{http_code}" \
+                -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+                -H "x-goog-api-key: $GEMINI_API_KEY" \
+                -H "Content-Type: application/json" \
+                -H "Api-Revision: 2026-05-20" \
+                -d @review_request.json)
+              echo "Review model=$model HTTP=$code (attempt $attempt)"
+              [ "$code" = "200" ] && { ok=1; break; }
+              if [ "$attempt" -lt 2 ]; then sleep 10; fi
+              attempt=$((attempt + 1))
+            done
+            [ "$ok" = "1" ] && break
+          done < text_models.txt
+          [ "$ok" = "1" ] || { cat review_response.json; exit 1; }
+
+          echo "$model" > used_text_model.txt
+          text=$(jq -r '.output_text // ""' review_response.json)
+          if [ -z "$text" ]; then
+            text=$(jq -r '[.steps[]? | select(.type=="model_output") | .content[]? | select(.type=="text")] | last | .text // ""' review_response.json)
+          fi
+          printf '%s' "$text" > review_raw.json
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          raw = Path("review_raw.json").read_text(encoding="utf-8")
+          match = re.search(r"\{.*\}", raw, re.S)
+          if not match:
+              raise SystemExit("No JSON object in review output")
+          story = json.loads(match.group(0))
+          for k in ("facts", "uncertainties", "improved_script", "scenes"):
+              if k not in story:
+                  raise SystemExit(f"Missing key: {k}")
+          if not isinstance(story["facts"], list) or not isinstance(story["uncertainties"], list) or not isinstance(story["scenes"], list):
+              raise SystemExit("Wrong JSON types in review output")
+          Path("storyboard.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+          echo "Text model used: $(cat used_text_model.txt)"
+
+      - name: QC and automatic fix
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SCENES: ${{ github.event.inputs.scenes }}
+        run: |
+          model=$(cat used_text_model.txt)
+          story=$(cat storyboard.json)
+          prompt="أنت مراجع جودة نهائي لقناة تعليمية مصرية. راجع الـ JSON ده: $story. تحقق من: صحة اللغة المصرية الطبيعية، غياب أي موسيقى أو غناء، عدد المشاهد يساوي $SCENES بالظبط، عدم وجود نص داخل وصف الصورة، ووجود تحذير واضح لأي ادعاء غير مؤكد. لو كل حاجة تمام اكتب {\"pass\":true,\"issues\":[],\"corrected\":null}. لو فيه مشكلة اكتب {\"pass\":false,\"issues\":[\"مشكلة\"],\"corrected\":{\"facts\":[...],\"uncertainties\":[...],\"improved_script\":\"...\",\"scenes\":[...]}} مع النسخة المصححة الكاملة. ارجع JSON فقط."
+
+          jq -n --arg model "$model" --arg prompt "$prompt" \
+            '{model:$model,input:[{type:"user_input",content:[{type:"text",text:$prompt}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{pass:{type:"boolean"},issues:{type:"array",items:{type:"string"}},corrected:{type:["object","null"],properties:{facts:{type:"array",items:{type:"string"}},uncertainties:{type:"array",items:{type:"object",properties:{claim:{type:"string"},reason:{type:"string"},check_suggestion:{type:"string"}},required:["claim","reason","check_suggestion"]}},improved_script:{type:"string"},scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["facts","uncertainties","improved_script","scenes"]}},required:["pass","issues"]}},store:false}' \
+            > qc_request.json
+
+          ok=0
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            code=$(curl -sS -o qc_response.json -w "%{http_code}" \
+              -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+              -H "x-goog-api-key: $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Api-Revision: 2026-05-20" \
+              -d @qc_request.json)
+            echo "QC model=$model HTTP=$code (attempt $attempt)"
+            [ "$code" = "200" ] && { ok=1; break; }
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 8)); fi
+            attempt=$((attempt + 1))
+          done
+          [ "$ok" = "1" ] || { cat qc_response.json; exit 1; }
+
+          text=$(jq -r '.output_text // ""' qc_response.json)
+          if [ -z "$text" ]; then
+            text=$(jq -r '[.steps[]? | select(.type=="model_output") | .content[]? | select(.type=="text")] | last | .text // ""' qc_response.json)
+          fi
+          printf '%s' "$text" > qc_raw.json
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          raw = Path("qc_raw.json").read_text(encoding="utf-8")
+          match = re.search(r"\{.*\}", raw, re.S)
+          if not match:
+              raise SystemExit("No JSON object in QC output")
+          qc = json.loads(match.group(0))
+          Path("qc-report.json").write_text(json.dumps(qc, ensure_ascii=False, indent=2), encoding="utf-8")
+          Path("review-notes.md").write_text("", encoding="utf-8")
+          if not qc.get("pass") and isinstance(qc.get("corrected"), dict):
+              Path("storyboard.json").write_text(json.dumps(qc["corrected"], ensure_ascii=False, indent=2), encoding="utf-8")
+              print("QC applied automatic correction")
+          else:
+              print("QC passed without correction")
+          PY
+
+      - name: Final structural validation
+        env:
+          SCENES: ${{ github.event.inputs.scenes }}
+        run: |
+          SCENES="$SCENES" python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          story = json.loads(Path("storyboard.json").read_text(encoding="utf-8"))
+          want = int(os.environ["SCENES"])
+          facts = story.get("facts") or []
+          uncertainties = story.get("uncertainties") or []
+          scenes = story.get("scenes") or []
+          improved = story.get("improved_script") or ""
+          if not isinstance(facts, list) or not isinstance(uncertainties, list) or not isinstance(scenes, list):
+              raise SystemExit("Wrong JSON types")
+          if len(scenes) < want:
+              raise SystemExit(f"QC FAIL: {len(scenes)} scenes, expected {want}")
+          if len(scenes) > want:
+              story["scenes"] = scenes[:want]
+              print(f"Trimmed scenes from {len(scenes)} to {want}")
+          for i, sc in enumerate(story["scenes"]):
+              if not str(sc.get("text", "")).strip():
+                  raise SystemExit(f"QC FAIL: empty scene text at {i}")
+              if not str(sc.get("image_prompt", "")).strip():
+                  raise SystemExit(f"QC FAIL: empty image prompt at {i}")
+          if re.search(r"موسيقى|موسيقة|غناء|لحن|آلة موسيقية", improved, re.S):
+              raise SystemExit("QC FAIL: music reference in improved script")
+          qc = json.loads(Path("qc-report.json").read_text(encoding="utf-8")) if Path("qc-report.json").exists() else {}
+          notes = []
+          notes.append("# Mode B review notes\n")
+          notes.append("## Improved script\n")
+          notes.append(improved.strip() + "\n")
+          notes.append("## Confirmed facts\n")
+          notes += [f"- {f}" for f in facts] or ["- none"]
+          notes.append("\n## Items needing verification\n")
+          for u in uncertainties:
+              notes.append(f"- Claim: {u.get('claim','')}")
+              notes.append(f"  - Reason: {u.get('reason','')}")
+              notes.append(f"  - Check: {u.get('check_suggestion','')}")
+          if not uncertainties:
+              notes.append("- none")
+          notes.append("\n## QC\n")
+          notes.append(f"- passed: {bool(qc.get('pass'))}")
+          for issue in qc.get("issues") or []:
+              notes.append(f"- issue: {issue}")
+          notes.append(f"- text model: {Path('used_text_model.txt').read_text(encoding='utf-8').strip()}")
+          Path("review-notes.md").write_text("\n".join(notes) + "\n", encoding="utf-8")
+          Path("storyboard.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(f"VALIDATION OK: scenes={len(story['scenes'])}")
+          PY
+          cp storyboard.json out/reviewed-storyboard.json
+          cp review-notes.md out/review-notes.md
+          cp qc-report.json out/qc-report.json
+          cp used_text_model.txt out/used_text_model.txt
+          ls -lh out
+
+      - name: Upload review deliverables
+        uses: actions/upload-artifact@v4
+        with:
+          name: script-review
+          path: |
+            out/reviewed-storyboard.json
+            out/review-notes.md
+            out/qc-report.json
+            out/used_text_model.txt
+          retention-days: 1
