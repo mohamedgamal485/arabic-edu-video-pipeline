@@ -1,0 +1,36 @@
+name: List Egyptian Arabic voices
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+
+      - name: Fetch ar-EG voices
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          curl -sS -G "https://generativelanguage.googleapis.com/v1beta/voices" \
+            -H "x-goog-api-key: $GEMINI_API_KEY" \
+            --data-urlencode "language_code=ar-EG" \
+            --data-urlencode "page_size=100" \
+            -o voices.json
+          jq -r '.voices[]? | [.id, .displayName, (.languageCode // ""), (.accent // "")] | @tsv' voices.json | head -n 40 > ar-eg-voices.txt
+          echo "Voice lines: $(wc -l < ar-eg-voices.txt)"
+          head -n 10 ar-eg-voices.txt
+
+      - name: Commit voice list
+        run: |
+          git config user.name "pipeline-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add ar-eg-voices.txt
+          git commit -m "Add Egyptian Arabic voice list" || echo "No changes"
+          git push
