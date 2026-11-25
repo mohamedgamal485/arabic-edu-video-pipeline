@@ -1,0 +1,321 @@
+﻿name: Full Arabic video pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "موضوع الفيديو"
+        required: true
+        default: "كيف بنيت الأهرامات؟"
+      scenes:
+        description: "عدد المشاهد (2-4)"
+        required: true
+        default: "4"
+      target_seconds:
+        description: "المدة المطلوبة تقريباً بالثانية (45-180)"
+        required: true
+        default: "90"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cloud tools and Arabic font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq ffmpeg fonts-noto-core fonts-noto-extra
+          ffmpeg -version | head -n 1
+          fc-match "Noto Sans Arabic" | head -n 1
+
+      - name: Preflight secrets
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for v in GEMINI_API_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            eval "val=\$$v"
+            if [ -z "$val" ]; then
+              echo "MISSING: $v"
+              exit 1
+            else
+              echo "PRESENT: $v"
+            fi
+          done
+
+      - name: Load supplied storyboard and narration
+        run: |
+          mkdir -p out
+          [ -s storyboard-v2.json ] || { echo "ABORT: missing storyboard-v2.json"; exit 1; }
+          if [ -s narration-v2.wav ]; then
+            echo "Using direct WAV upload"
+            cp narration-v2.wav out/narration.wav
+          else
+            parts=$(ls narration-v2.b64.part*.txt 2>/dev/null | wc -l)
+            if [ "$parts" -lt 1 ]; then
+              echo "ABORT: missing narration-v2.wav and narration-v2.b64 parts"
+              exit 1
+            fi
+            echo "Reassembling narration from $parts base64 parts"
+            cat narration-v2.b64.part*.txt | tr -d '\r\n ' | base64 -d > out/narration.wav
+          fi
+          [ -s out/narration.wav ] || { echo "ABORT: narration decode failed"; exit 1; }
+          cp storyboard-v2.json storyboard.json
+          echo "user-supplied-script-with-emotion-tags" > used_text_model.txt
+          n=$(jq '.scenes | length' storyboard.json)
+          if [ "$n" -lt 2 ] || [ "$n" -gt 4 ]; then
+            echo "ABORT: scenes must be between 2 and 4"
+            exit 1
+          fi
+          dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          size=$(stat -c%s out/narration.wav)
+          echo "Supplied narration OK: scenes=$n duration=$dur size=$size voice=ar-eg-tutor-5"
+
+      - name: Align narration with Whisper and fit target duration
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TARGET: ${{ github.event.inputs.target_seconds }}
+        run: |
+          case "$TARGET" in ''|*[!0-9]*) echo "ABORT: target_seconds must be an integer"; exit 1 ;; esac
+          [ -s out/narration.wav ] || { echo "ABORT: missing narration"; exit 1; }
+          jq -n --arg audio "$(base64 -w0 out/narration.wav)" \
+            '{audio:$audio,task:"transcribe",language:"ar",vad_filter:true}' > asr_req.json
+          ok=0
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            code=$(curl -sS -o asr_resp.json -w "%{http_code}" \
+              -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/@cf/openai/whisper-large-v3-turbo" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d @asr_req.json)
+            echo "Whisper HTTP=$code (attempt $attempt)"
+            [ "$code" = "200" ] && { ok=1; break; }
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 8)); fi
+            attempt=$((attempt + 1))
+          done
+          [ "$ok" = "1" ] || { cat asr_resp.json; exit 1; }
+          [ "$(jq -r '.success // false' asr_resp.json)" = "true" ] || { cat asr_resp.json; exit 1; }
+          jq '.result' asr_resp.json > asr_result.json
+
+          raw_duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          RAW_DURATION="$raw_duration" python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          result = json.loads(Path("asr_result.json").read_text(encoding="utf-8"))
+          segments = result.get("segments") or []
+          words = []
+          for seg in segments:
+              ws = seg.get("words") or []
+              if ws:
+                  for w in ws:
+                      s, e = w.get("start"), w.get("end")
+                      if s is not None and e is not None:
+                          words.append((float(s), float(e), str(w.get("word", ""))))
+              else:
+                  s, e = seg.get("start"), seg.get("end")
+                  if s is not None and e is not None:
+                      words.append((float(s), float(e), str(seg.get("text", ""))))
+          def norm(text):
+              text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", str(text))
+              text = re.sub(r"[^\w\u0600-\u06FF\s]", " ", text)
+              return [t for t in text.split() if t]
+          story = json.loads(Path("storyboard.json").read_text(encoding="utf-8"))
+          token_sets = [norm(sc.get("text", "")) for sc in story["scenes"]]
+          total_tokens = sum(len(t) for t in token_sets)
+          if total_tokens == 0:
+              raise SystemExit("No scene tokens to align")
+          raw_duration = float(os.environ.get("RAW_DURATION", "0"))
+          if len(words) < len(token_sets):
+              if raw_duration <= 0:
+                  raise SystemExit("Not enough Whisper timings and no audio duration")
+              boundaries = []
+              cum = 0
+              for tokens in token_sets:
+                  start = raw_duration * cum / total_tokens
+                  cum += len(tokens)
+                  end = raw_duration * cum / total_tokens
+                  boundaries.append([start, end])
+              source = "token proportions"
+          else:
+              boundaries = []
+              cum = 0
+              n = len(words)
+              for tokens in token_sets:
+                  i0 = int(round(cum / total_tokens * n))
+                  cum += len(tokens)
+                  i1 = int(round(cum / total_tokens * n))
+                  i0 = max(0, min(i0, n - 1))
+                  i1 = max(i0 + 1, min(i1, n))
+                  boundaries.append([words[i0][0], words[i1 - 1][1]])
+              source = "Whisper timings"
+          Path("boundaries.json").write_text(json.dumps(boundaries, ensure_ascii=False), encoding="utf-8")
+          print(f"Boundary source={source} units={len(words)} scenes={len(boundaries)} raw_duration={raw_duration:.2f}")
+          PY
+
+          total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
+          hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
+          if awk -v d="$total" -v lo="$lo" -v hi="$hi" 'BEGIN { exit !(d >= lo && d <= hi) }'; then
+            factor="1.000000"
+            filter="anull"
+            echo "Duration already inside range; keeping original performance"
+          else
+            factor=$(awk -v t="$TARGET" -v d="$total" 'BEGIN {printf "%.6f", t/d}')
+            if awk -v f="$factor" 'BEGIN { exit !(f >= 0.25 && f <= 4.0) }'; then
+              echo "ABORT: duration factor $factor outside supported range"
+              exit 1
+            fi
+            if awk -v f="$factor" 'BEGIN { exit !(f >= 0.5 && f <= 2.0) }'; then
+              filter="atempo=$factor"
+            else
+              root=$(awk -v f="$factor" 'BEGIN {printf "%.6f", sqrt(f)}')
+              filter="atempo=$root,atempo=$root"
+            fi
+          fi
+          echo "$factor" > factor.txt
+          echo "$filter" > tempo_filter.txt
+          echo "Raw duration=$total target=$TARGET range=[$lo,$hi] factor=$factor filter=$filter"
+          ffmpeg -y -i out/narration.wav -filter:a "$filter" out/narration_fit.wav
+          mv out/narration_fit.wav out/narration.wav
+
+          final_total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          FINAL_TOTAL="$final_total" python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          factor = float(Path("factor.txt").read_text(encoding="utf-8").strip())
+          total = float(os.environ["FINAL_TOTAL"])
+          boundaries = json.loads(Path("boundaries.json").read_text(encoding="utf-8"))
+          base = boundaries[0][0] if boundaries else 0.0
+          scaled = []
+          for start, end in boundaries:
+              s2 = max(0.0, (start - base) / factor)
+              e2 = max(s2 + 0.1, (end - base) / factor)
+              scaled.append([s2, e2])
+          if scaled:
+              scaled[-1][1] = max(total, scaled[-1][0] + 0.1)
+          with open("durations.txt", "w", encoding="utf-8") as f:
+              for start, end in scaled:
+                  f.write(f"{end - start:.6f}\n")
+          Path("boundaries.json").write_text(json.dumps(scaled, ensure_ascii=False), encoding="utf-8")
+          print(f"Scene durations sum={sum(e - s for s, e in scaled):.2f} audio={total:.2f}")
+          PY
+
+          final_total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          echo "ASR alignment OK: scenes=$(wc -l < durations.txt) final_duration=$final_total"
+      - name: Generate scene images
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          n=$(jq '.scenes | length' storyboard.json)
+          suffix="photorealistic documentary photograph, high detail, natural light, no cartoon, no illustration, no painting, no text"
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            prompt=$(jq -r ".scenes[$i].image_prompt" storyboard.json)
+            jq -n --arg prompt "$prompt" --arg suffix "$suffix" '{prompt:($prompt + " | " + $suffix),steps:8}' > image_req.json
+            ok=0
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              code=$(curl -sS -o image_resp.json -w "%{http_code}" \
+                -X POST "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai/run/@cf/black-forest-labs/flux-1-schnell" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d @image_req.json)
+              echo "Image scene $i HTTP=$code (attempt $attempt)"
+              [ "$code" = "200" ] && { ok=1; break; }
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+              attempt=$((attempt + 1))
+            done
+            [ "$ok" = "1" ] || { cat image_resp.json; exit 1; }
+            jq -r '.result.image' image_resp.json | base64 --decode > "scene_$i.jpg"
+            i=$((i+1))
+          done
+          file scene_*.jpg
+
+      - name: Build subtitles and render video
+        env:
+          TARGET: ${{ github.event.inputs.target_seconds }}
+        run: |
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          story = json.loads(Path("storyboard.json").read_text(encoding="utf-8"))
+          boundaries = json.loads(Path("boundaries.json").read_text(encoding="utf-8"))
+          def ts(sec):
+              h = int(sec // 3600)
+              m = int((sec % 3600) // 60)
+              s = sec % 60
+              return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+          def clean_caption(text):
+              text = re.sub(r"<[^>]+>", "", str(text))
+              text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", text)
+              text = text.replace("\u200e", "").replace("\u200f", "")
+              return text.strip()
+          lines = []
+          vlist = []
+          for i, (scene, (start, end)) in enumerate(zip(story["scenes"], boundaries)):
+              lines.append(str(i + 1))
+              lines.append(f"{ts(start)} --> {ts(end)}")
+              lines.append(clean_caption(scene["text"]))
+              lines.append("")
+              vlist.append(f"file 'seg_{i}.mp4'")
+          Path("subtitles.srt").write_text("\n".join(lines), encoding="utf-8")
+          Path("video_list.txt").write_text("\n".join(vlist) + "\n", encoding="utf-8")
+          print(Path("subtitles.srt").read_text(encoding="utf-8"))
+          PY
+          n=$(jq '.scenes | length' storyboard.json)
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            d=$(sed -n "$((i+1))p" durations.txt)
+            ffmpeg -y -loop 1 -i "scene_$i.jpg" -t "$d" \
+              -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,zoompan=z='min(zoom+0.0004,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1920x1080:fps=30,format=yuv420p" \
+              -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p "seg_$i.mp4"
+            i=$((i+1))
+          done
+          ffmpeg -y -f concat -safe 0 -i video_list.txt -c copy video_only.mp4
+          ffmpeg -y -i video_only.mp4 -i out/narration.wav \
+            -vf "subtitles=subtitles.srt:force_style='FontName=Noto Sans Arabic,FontSize=30,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=70,Alignment=2'" \
+            -c:v libx264 -preset veryfast -crf 21 -pix_fmt yuv420p \
+            -c:a aac -b:a 128k -shortest -movflags +faststart out/final.mp4
+          cp storyboard.json out/script.json
+          cp subtitles.srt out/subtitles.srt
+          cp used_text_model.txt out/used_text_model.txt
+          echo "$TARGET" > out/target_seconds.txt
+          ls -lh out/final.mp4
+
+      - name: QC
+        env:
+          TARGET: ${{ github.event.inputs.target_seconds }}
+        run: |
+          ffprobe -v error -show_entries stream=index,codec_type,codec_name,duration -show_entries format=duration,size -of default=nw=1 out/final.mp4
+          dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/final.mp4)
+          size=$(stat -c%s out/final.mp4)
+          lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
+          hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
+          awk -v d="$dur" -v lo="$lo" -v hi="$hi" 'BEGIN { if (d < lo || d > hi) exit 1 }' || { echo "FAIL: duration $dur outside [$lo,$hi]"; exit 1; }
+          [ "$size" -gt 100000 ] || { echo "FAIL: file too small"; exit 1; }
+          ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 out/final.mp4 | grep -q . || { echo "FAIL: no audio"; exit 1; }
+          ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 out/final.mp4 | grep -q . || { echo "FAIL: no video"; exit 1; }
+          echo "QC OK: duration=$dur target=$TARGET range=[$lo,$hi] size=$size"
+
+      - name: Upload deliverables
+        uses: actions/upload-artifact@v4
+        with:
+          name: arabic-video
+          path: |
+            out/final.mp4
+            out/script.json
+            out/subtitles.srt
+            out/used_text_model.txt
+            out/target_seconds.txt
+          retention-days: 1
+
+
+
