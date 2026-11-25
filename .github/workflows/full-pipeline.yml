@@ -54,9 +54,9 @@ jobs:
             -H "x-goog-api-key: $GEMINI_API_KEY" \
             "https://generativelanguage.googleapis.com/v1beta/models")
           [ "$code" = "200" ] || { cat models.json; exit 1; }
-          for m in gemini-3-flash gemini-2.5-flash gemini-2.0-flash gemini-flash-latest gemini-1.5-flash; do
+          for m in gemini-3.8-flash gemini-4-hydrogen gemini-flash-latest; do
             if jq -e --arg m "models/$m" \
-              '.models[]? | select(.name==$m) | select((.supportedGenerationMethods // []) | index("generateContent"))' \
+              '.models[]? | select(.name==$m)' \
               models.json >/dev/null; then
               echo "$m" > text_model.txt
               break
@@ -78,16 +78,17 @@ jobs:
           model=$(cat text_model.txt)
           prompt="أنت كاتب محتوى تعليمي مصري. ابحث في معلوماتك عن الموضوع ده: $TOPIC. اكتب نصًا مصريًا طبيعيًا، جمل قصيرة، من غير فصحى تقيلة، ومن غير أي موسيقى. المطلوب JSON فقط بالشكل ده: {\"facts\":[\"حقيقة مختصرة\",\"حقيقة مختصرة\"],\"scenes\":[{\"text\":\"جملة أو جملتان للمشهد\",\"image_prompt\":\"وصف صورة تعليمية بالإنجليزية، بدون أي نص داخل الصورة\"}]}. عدد المشاهد لازم يكون $SCENES بالظبط. كل نص مشهد لازم يقرأ في 6 لحد 12 ثانية. الصور لازم تكون رسوم تعليمية نظيفة ومناسبة لقناة تعليمية، بدون موسيقى."
           jq -n --arg model "$model" --arg prompt "$prompt" \
-            '{model:$model,contents:[{role:"user",parts:[{text:$prompt}]}],generationConfig:{responseMimeType:"application/json",temperature:0.7}}' \
+            '{model:$model,input:[{type:"user_input",content:[{type:"text",text:$prompt}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{facts:{type:"array",items:{type:"string"}},scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["facts","scenes"]}}}' \
             > script_request.json
           code=$(curl -sS -o script_response.json -w "%{http_code}" \
-            -X POST "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent" \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
             -H "x-goog-api-key: $GEMINI_API_KEY" \
             -H "Content-Type: application/json" \
+            -H "Api-Revision: 2026-05-20" \
             -d @script_request.json)
           echo "Script HTTP: $code"
           [ "$code" = "200" ] || { cat script_response.json; exit 1; }
-          jq -r '.candidates[0].content.parts[0].text // empty' script_response.json > script_raw.json
+          jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="text")] | last | .text // empty' script_response.json > script_raw.json
           jq -e 'select(.scenes and (.scenes | length > 0))' script_raw.json > storyboard.json 2>/dev/null || {
             sed -n '/^{/,/^}/p' script_raw.json | jq -e 'select(.scenes and (.scenes | length > 0))' > storyboard.json || { cat script_raw.json; exit 1; }
           }
