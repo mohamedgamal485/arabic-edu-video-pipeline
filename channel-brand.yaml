@@ -1,0 +1,37 @@
+# هوية القناة — مسودة أولية قابلة للتعديل
+channel:
+  name: "عربي بسيط"
+  tagline: "شروح مصرية واضحة.. بدون موسيقى"
+  language: "ar-EG"
+  voice_profile: "Gemini 3.8 Flash TTS — Egyptian Arabic"
+  voice_id: "ar-eg-tutor-5"
+  voice_note: "User-confirmed on 2026-11-25 from ar-EG audition; changeable in one line"
+
+brand:
+  palette:
+    primary: "#0F3D3E"
+    accent: "#F2C14E"
+    background: "#F7F5EF"
+    text: "#122326"
+  typography:
+    headings: "Cairo"
+    body: "Tajawal"
+    fallback: "Noto Sans Arabic"
+  logo_concept: "دائرة بلون أساسي بداخلها حرف ع بخط Cairo وخط ذهبي رفيع؛ تُنشأ كملف متجه لاحقاً"
+
+intro:
+  seconds: 2
+  on_screen: "عربي بسيط"
+  sound: "sfx_soft_click"
+
+outro:
+  seconds: 2
+  on_screen: "شكراً للمتابعة"
+  sound: "sfx_soft_click"
+
+title_pattern: "{topic} | شرح في دقيقتين"
+
+sound_policy:
+  background_music: false
+  allowed_sfx: ["soft_click", "soft_whoosh", "page_turn"]
+  forbidden: ["music", "instrumental", "royalty_free_music_track"]

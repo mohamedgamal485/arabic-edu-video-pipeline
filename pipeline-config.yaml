@@ -1,0 +1,40 @@
+repo:
+  name: "arabic-edu-video-pipeline"
+  visibility: "public"
+  provider: "github"
+
+output_dir: "C:/Users/HP/OneDrive/Desktop/videos AI"
+local_role: "download_final_mp4_only"
+
+modes:
+  A_topic_only: ["research", "fact_check", "script", "storyboard"]
+  B_existing_script: ["review", "fact_check", "improve", "storyboard"]
+
+services:
+  text: "gemini-4-hydrogen / gemini-3.6-flash / gemini-3.5-flash-lite (free tier, automatic fallback)"
+  tts: "gemini-3.8-flash-tts (ar-eg-tutor-5, user-confirmed, free tier)"
+  images: "cloudflare-workers-ai @cf/black-forest-labs/flux-1-schnell"
+  asr: "cloudflare-whisper-large-v3-turbo (preferred), groq-whisper (free fallback)"
+  stock: ["pexels", "pixabay", "wikimedia-commons"]
+  render: "github-actions ubuntu-latest + ffmpeg"
+  storage: "github-actions-artifacts (temporary, deleted after local download)"
+  secrets_store: "github-actions-secrets"
+
+preflight:
+  cloudflare_neuron_budget_per_video: 7000
+  gemini_tts_requests_per_video: 3
+  tts_requests_are_per_scene: true
+  max_videos_per_run: 4
+  abort_if_unknown_quota: true
+  no_paid_fallback: true
+  spend_limit_usd: 0
+
+qc:
+  auto_fix_and_recheck: true
+  checks: ["script_structure", "srt_timing", "ffprobe_duration_size_audio_video"]
+  planned_checks: ["script_vs_transcript", "frame_sampling", "license_log"]
+  human_sample_when_subjective: true
+
+delivery:
+  artifact_retention_hours: 24
+  delete_after_download: true
