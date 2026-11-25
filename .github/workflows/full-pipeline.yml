@@ -10,7 +10,11 @@ on:
       scenes:
         description: "عدد المشاهد (2-4)"
         required: true
-        default: "3"
+        default: "4"
+      target_seconds:
+        description: "المدة المطلوبة تقريباً بالثانية (45-180)"
+        required: true
+        default: "90"
 
 permissions:
   contents: read
@@ -75,8 +79,22 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TOPIC: ${{ github.event.inputs.topic }}
           SCENES: ${{ github.event.inputs.scenes }}
+          TARGET: ${{ github.event.inputs.target_seconds }}
         run: |
-          prompt="أنت كاتب محتوى تعليمي مصري. ابحث في معلوماتك عن الموضوع ده: $TOPIC. اكتب نصًا مصريًا طبيعيًا، جمل قصيرة، من غير فصحى تقيلة، ومن غير أي موسيقى. المطلوب JSON فقط بالشكل ده: {\"facts\":[\"حقيقة مختصرة\",\"حقيقة مختصرة\"],\"scenes\":[{\"text\":\"جملة أو جملتان للمشهد\",\"image_prompt\":\"وصف صورة تعليمية بالإنجليزية، بدون أي نص داخل الصورة\"}]}. عدد المشاهد لازم يكون $SCENES بالظبط. كل نص مشهد لازم يقرأ في 6 لحد 12 ثانية. الصور لازم تكون رسوم تعليمية نظيفة ومناسبة لقناة تعليمية، بدون موسيقى."
+          for v in SCENES TARGET; do
+            eval "val=\$$v"
+            case "$val" in ''|*[!0-9]*) echo "ABORT: $v must be an integer"; exit 1 ;; esac
+          done
+          if [ "$SCENES" -lt 2 ] || [ "$SCENES" -gt 4 ]; then
+            echo "ABORT: scenes must be between 2 and 4"
+            exit 1
+          fi
+          if [ "$TARGET" -lt 45 ] || [ "$TARGET" -gt 180 ]; then
+            echo "ABORT: target_seconds must be between 45 and 180"
+            exit 1
+          fi
+          PER_SCENE=$((TARGET / SCENES))
+          prompt="أنت كاتب محتوى تعليمي مصري. ابحث في معلوماتك عن الموضوع ده: $TOPIC. اكتب نصًا مصريًا طبيعيًا، جمل قصيرة، من غير فصحى تقيلة، ومن غير أي موسيقى أو غناء. المطلوب JSON فقط بالشكل ده: {\"facts\":[\"حقيقة مختصرة\",\"حقيقة مختصرة\"],\"scenes\":[{\"text\":\"نص المشهد\",\"image_prompt\":\"English photorealistic documentary image prompt, no text inside image\"}]}. عدد المشاهد لازم يكون $SCENES بالظبط. إجمالي النص لازم يقرأ في حوالي $TARGET ثانية، يعني متوسط $PER_SCENE ثانية لكل مشهد؛ اكتب جمل كافية عشان توصل للمدة دي من غير حشو. وصف كل صورة لازم يكون بالإنجليزية بس وبأسلوب صورة فوتوغرافية وثائقية واقعية عالية التفاصيل: photorealistic documentary photograph, real historical location or artifact, natural light, 35mm lens, no cartoon, no illustration, no painting, no text inside image."
           ok=0
           while IFS= read -r model; do
             [ -n "$model" ] || continue
@@ -130,39 +148,106 @@ jobs:
       - name: Generate Egyptian Arabic narration
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TARGET: ${{ github.event.inputs.target_seconds }}
         run: |
+          case "$TARGET" in ''|*[!0-9]*) echo "ABORT: target_seconds must be an integer"; exit 1 ;; esac
           n=$(jq '.scenes | length' storyboard.json)
-          : > durations.txt
-          : > audio_list.txt
-          i=0
-          while [ "$i" -lt "$n" ]; do
-            text=$(jq -r ".scenes[$i].text" storyboard.json)
-            jq -n --arg text "$text" \
-              '{model:"gemini-3.8-flash-tts",input:[{type:"user_input",content:[{type:"text",text:$text,annotations:[{type:"speech_metadata",style:"warm, friendly, casual Egyptian storytelling"}]}]}],response_format:{type:"audio"},generation_config:{speech_config:[{voice:"ar-eg-tutor-5"}]}}' \
-              > tts_req.json
+          model=$(cat used_text_model.txt)
+
+          tts_all() {
+            : > durations.txt
+            : > audio_list.txt
+            i=0
+            while [ "$i" -lt "$n" ]; do
+              text=$(jq -r ".scenes[$i].text" storyboard.json)
+              jq -n --arg text "$text" \
+                '{model:"gemini-3.8-flash-tts",input:[{type:"user_input",content:[{type:"text",text:$text,annotations:[{type:"speech_metadata",style:"warm, friendly, casual Egyptian storytelling"}]}]}],response_format:{type:"audio"},generation_config:{speech_config:[{voice:"ar-eg-tutor-5"}]}}' \
+                > tts_req.json
+              ok=0
+              attempt=1
+              while [ "$attempt" -le 4 ]; do
+                code=$(curl -sS -o tts_resp.json -w "%{http_code}" \
+                  -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+                  -H "x-goog-api-key: $GEMINI_API_KEY" \
+                  -H "Content-Type: application/json" \
+                  -H "Api-Revision: 2026-05-20" \
+                  -d @tts_req.json)
+                echo "TTS scene $i HTTP=$code (attempt $attempt)"
+                [ "$code" = "200" ] && { ok=1; break; }
+                if [ "$attempt" -lt 4 ]; then sleep $((attempt * 8)); fi
+                attempt=$((attempt + 1))
+              done
+              [ "$ok" = "1" ] || { cat tts_resp.json; exit 1; }
+              jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data' tts_resp.json | base64 --decode > "scene_$i.wav"
+              d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "scene_$i.wav")
+              echo "$d" >> durations.txt
+              echo "file 'scene_$i.wav'" >> audio_list.txt
+              i=$((i+1))
+            done
+            ffmpeg -y -f concat -safe 0 -i audio_list.txt -ar 24000 -ac 1 -c:a pcm_s16le out/narration.wav
+            ls -lh scene_*.wav out/narration.wav
+          }
+
+          total_duration() { awk '{s+=$1} END {printf "%.2f", s+0}' durations.txt; }
+
+          tts_all
+          total=$(total_duration)
+          lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
+          hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
+          if awk -v d="$total" -v lo="$lo" -v hi="$hi" 'BEGIN { exit !(d < lo || d > hi) }'; then
+            echo "Duration $total outside [$lo,$hi]; repairing script text once"
+            story=$(cat storyboard.json)
+            per=$((TARGET / n))
+            prompt="عدّل نص المشاهد دول عشان إجمالي القراءة يبقى حوالي $TARGET ثانية، يعني متوسط $per ثانية لكل مشهد. خلي image_prompt زي ما هو بالظبط، وغيّر text بس. ارجع JSON فقط: {\"scenes\":[{\"text\":\"...\",\"image_prompt\":\"...\"}]}. النص مصري طبيعي، جمل قصيرة، من غير أي موسيقى أو غناء."
+            jq -n --arg model "$model" --arg prompt "$prompt" --arg story "$story" \
+              '{model:$model,input:[{type:"user_input",content:[{type:"text",text:($prompt + "\n" + $story)}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["scenes"]}},store:false}' \
+              > fix_request.json
             ok=0
             attempt=1
-            while [ "$attempt" -le 4 ]; do
-              code=$(curl -sS -o tts_resp.json -w "%{http_code}" \
+            while [ "$attempt" -le 3 ]; do
+              code=$(curl -sS -o fix_response.json -w "%{http_code}" \
                 -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
                 -H "x-goog-api-key: $GEMINI_API_KEY" \
                 -H "Content-Type: application/json" \
                 -H "Api-Revision: 2026-05-20" \
-                -d @tts_req.json)
-              echo "TTS scene $i HTTP=$code (attempt $attempt)"
+                -d @fix_request.json)
+              echo "Duration repair HTTP=$code (attempt $attempt)"
               [ "$code" = "200" ] && { ok=1; break; }
-              if [ "$attempt" -lt 4 ]; then sleep $((attempt * 8)); fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 8)); fi
               attempt=$((attempt + 1))
             done
-            [ "$ok" = "1" ] || { cat tts_resp.json; exit 1; }
-            jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data' tts_resp.json | base64 --decode > "scene_$i.wav"
-            d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "scene_$i.wav")
-            echo "$d" >> durations.txt
-            echo "file 'scene_$i.wav'" >> audio_list.txt
-            i=$((i+1))
-          done
-          ffmpeg -y -f concat -safe 0 -i audio_list.txt -ar 24000 -ac 1 -c:a pcm_s16le out/narration.wav
-          ls -lh scene_*.wav out/narration.wav
+            [ "$ok" = "1" ] || { cat fix_response.json; exit 1; }
+            text=$(jq -r '.output_text // ""' fix_response.json)
+            if [ -z "$text" ]; then
+              text=$(jq -r '[.steps[]? | select(.type=="model_output") | .content[]? | select(.type=="text")] | last | .text // ""' fix_response.json)
+            fi
+            printf '%s' "$text" > fix_raw.json
+          N="$n" python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          raw = Path("fix_raw.json").read_text(encoding="utf-8")
+          m = re.search(r"\{.*\}", raw, re.S)
+          if not m:
+              raise SystemExit("No JSON object in duration repair output")
+          fixed = json.loads(m.group(0))
+          scenes = fixed.get("scenes") or []
+          if len(scenes) != int(os.environ["N"]):
+              raise SystemExit("Duration repair scene count mismatch")
+          story = json.loads(Path("storyboard.json").read_text(encoding="utf-8"))
+          for i, sc in enumerate(scenes):
+              new_text = str(sc.get("text", "")).strip()
+              if not new_text:
+                  raise SystemExit("Empty repaired scene text")
+              story["scenes"][i]["text"] = new_text
+          Path("storyboard.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
+          PY
+            tts_all
+            total=$(total_duration)
+            echo "Duration after repair: $total"
+          else
+            echo "Duration OK: $total within [$lo,$hi]"
+          fi
+          echo "NARRATION_TOTAL=$total" >> "$GITHUB_ENV"
 
       - name: Generate scene images
         env:
@@ -170,10 +255,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           n=$(jq '.scenes | length' storyboard.json)
+          suffix="photorealistic documentary photograph, high detail, natural light, no cartoon, no illustration, no painting, no text"
           i=0
           while [ "$i" -lt "$n" ]; do
             prompt=$(jq -r ".scenes[$i].image_prompt" storyboard.json)
-            jq -n --arg prompt "$prompt" '{prompt:$prompt,steps:4}' > image_req.json
+            jq -n --arg prompt "$prompt" --arg suffix "$suffix" '{prompt:($prompt + " | " + $suffix),steps:8}' > image_req.json
             ok=0
             attempt=1
             while [ "$attempt" -le 3 ]; do
@@ -194,9 +280,11 @@ jobs:
           file scene_*.jpg
 
       - name: Build subtitles and render video
+        env:
+          TARGET: ${{ github.event.inputs.target_seconds }}
         run: |
           python3 - <<'PY'
-          import json
+          import json, re
           from pathlib import Path
           story = json.loads(Path("storyboard.json").read_text(encoding="utf-8"))
           durations = [float(x) for x in Path("durations.txt").read_text().split()]
@@ -205,6 +293,10 @@ jobs:
               m = int((sec % 3600) // 60)
               s = sec % 60
               return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+          def clean_caption(text):
+              text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", str(text))
+              text = text.replace("\u200e", "").replace("\u200f", "")
+              return text.strip()
           start = 0.0
           lines = []
           vlist = []
@@ -212,7 +304,7 @@ jobs:
               d = durations[i]
               lines.append(str(i + 1))
               lines.append(f"{ts(start)} --> {ts(start + d)}")
-              lines.append(scene["text"])
+              lines.append(clean_caption(scene["text"]))
               lines.append("")
               vlist.append(f"file 'seg_{i}.mp4'")
               start += d
@@ -237,18 +329,23 @@ jobs:
           cp storyboard.json out/script.json
           cp subtitles.srt out/subtitles.srt
           cp used_text_model.txt out/used_text_model.txt
+          echo "$TARGET" > out/target_seconds.txt
           ls -lh out/final.mp4
 
       - name: QC
+        env:
+          TARGET: ${{ github.event.inputs.target_seconds }}
         run: |
           ffprobe -v error -show_entries stream=index,codec_type,codec_name,duration -show_entries format=duration,size -of default=nw=1 out/final.mp4
           dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/final.mp4)
           size=$(stat -c%s out/final.mp4)
-          awk -v d="$dur" 'BEGIN { if (d < 10) exit 1 }' || { echo "FAIL: duration too short"; exit 1; }
+          lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
+          hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
+          awk -v d="$dur" -v lo="$lo" -v hi="$hi" 'BEGIN { if (d < lo || d > hi) exit 1 }' || { echo "FAIL: duration $dur outside [$lo,$hi]"; exit 1; }
           [ "$size" -gt 100000 ] || { echo "FAIL: file too small"; exit 1; }
           ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 out/final.mp4 | grep -q . || { echo "FAIL: no audio"; exit 1; }
           ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 out/final.mp4 | grep -q . || { echo "FAIL: no video"; exit 1; }
-          echo "QC OK: duration=$dur size=$size"
+          echo "QC OK: duration=$dur target=$TARGET range=[$lo,$hi] size=$size"
 
       - name: Upload deliverables
         uses: actions/upload-artifact@v4
@@ -259,4 +356,5 @@ jobs:
             out/script.json
             out/subtitles.srt
             out/used_text_model.txt
+            out/target_seconds.txt
           retention-days: 1
