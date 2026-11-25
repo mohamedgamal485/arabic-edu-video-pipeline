@@ -20,8 +20,8 @@ jobs:
       - name: Render 5-second test MP4
         run: |
           mkdir -p out
-          ffmpeg -y -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=5" \
-            -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart \
+          ffmpeg -y -f lavfi -i "testsrc=size=1280x720:rate=25" -t 5 \
+            -c:v mpeg4 -q:v 5 -pix_fmt yuv420p -movflags +faststart \
             out/smoke.mp4
 
       - name: Verify output
