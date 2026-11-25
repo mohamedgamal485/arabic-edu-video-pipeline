@@ -10,9 +10,13 @@ on:
       scenes_per_video:
         description: "عدد المشاهد في كل فيديو"
         required: true
-        default: "3"
-      acknowledge_unpublished_gemini_rpd:
-        description: "اكتب true لقبول أن حد Gemini اليومي غير منشور رسمياً"
+        default: "4"
+      target_seconds:
+        description: "المدة المتوقعة لكل فيديو بالثانية"
+        required: true
+        default: "90"
+      acknowledge_gemini_tts_limit:
+        description: "اكتب true بعد مراجعة حد Gemini TTS المؤكد: 10 طلبات/يوم"
         required: true
         default: "true"
 
@@ -43,9 +47,10 @@ jobs:
         env:
           VIDEOS: ${{ github.event.inputs.videos }}
           SCENES: ${{ github.event.inputs.scenes_per_video }}
-          ACK: ${{ github.event.inputs.acknowledge_unpublished_gemini_rpd }}
+          TARGET: ${{ github.event.inputs.target_seconds }}
+          ACK: ${{ github.event.inputs.acknowledge_gemini_tts_limit }}
         run: |
-          for v in VIDEOS SCENES; do
+          for v in VIDEOS SCENES TARGET; do
             eval "val=\$$v"
             case "$val" in
               ''|*[!0-9]*) echo "ABORT: $v must be a positive integer"; exit 1 ;;
@@ -59,30 +64,39 @@ jobs:
             echo "ABORT: scenes_per_video must be between 2 and 4"
             exit 1
           fi
-          echo "Gemini text and TTS: officially free of charge; exact free RPD is not published"
-          if [ "$ACK" != "true" ]; then
-            echo "ABORT: unpublished Gemini RPD not acknowledged"
+          if [ "$TARGET" -lt 45 ] || [ "$TARGET" -gt 180 ]; then
+            echo "ABORT: target_seconds must be between 45 and 180"
             exit 1
           fi
-          echo "Gemini RPD: unpublished; allowed by explicit input; production aborts immediately on 429/quota"
+          echo "Gemini TTS free limit confirmed by API: 10 requests/day"
+          if [ "$ACK" != "true" ]; then
+            echo "ABORT: Gemini TTS 10/day limit not acknowledged"
+            exit 1
+          fi
+          if [ "$VIDEOS" -gt 10 ]; then
+            echo "ABORT: $VIDEOS videos exceed the confirmed Gemini TTS limit of 10 requests/day"
+            exit 1
+          fi
 
-          neurons_per_image=100
           neuron_limit=10000
-          needed=$((VIDEOS * SCENES * neurons_per_image))
+          image_neurons=$((VIDEOS * SCENES * 100))
+          whisper_neurons=$(awk -v v="$VIDEOS" -v t="$TARGET" 'BEGIN {printf "%.0f", v * (t/60) * 46.63}')
+          needed=$((image_neurons + whisper_neurons))
           if [ "$needed" -gt "$neuron_limit" ]; then
             echo "ABORT: Cloudflare Neurons needed=$needed exceeds free daily limit=$neuron_limit"
             exit 1
           fi
 
-          tts_requests=$((VIDEOS * SCENES))
+          tts_requests=$VIDEOS
           text_requests=$VIDEOS
-          echo "Cloudflare Workers AI: conservative budget=$needed/$neuron_limit Neurons/day"
-          echo "Gemini requests planned: text=$text_requests, tts=$tts_requests"
+          echo "Cloudflare Workers AI: images=$image_neurons + whisper=$whisper_neurons = $needed/$neuron_limit Neurons/day"
+          echo "Gemini requests planned: text=$text_requests, tts=$tts_requests (1 per video)"
           echo "GitHub Actions: public repo hosted runner, no local render, no paid fallback"
           echo "Artifacts: temporary only; deleted after local download"
 
           echo "VIDEOS=$VIDEOS" >> "$GITHUB_ENV"
           echo "SCENES=$SCENES" >> "$GITHUB_ENV"
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
           echo "NEEDED_NEURONS=$needed" >> "$GITHUB_ENV"
           echo "TTS_REQUESTS=$tts_requests" >> "$GITHUB_ENV"
 
@@ -91,4 +105,4 @@ jobs:
           echo "SPEND_LIMIT_USD=0"
           echo "PAID_FALLBACK=false"
           echo "NO_LOCAL_AI_OR_RENDER=true"
-          echo "PREFLIGHT OK: videos=$VIDEOS scenes_per_video=$SCENES neurons=$NEEDED_NEURONS/10000 tts_requests=$TTS_REQUESTS"
+          echo "PREFLIGHT OK: videos=$VIDEOS scenes_per_video=$SCENES target=$TARGET neurons=$NEEDED_NEURONS/10000 tts_requests=$TTS_REQUESTS/10"
