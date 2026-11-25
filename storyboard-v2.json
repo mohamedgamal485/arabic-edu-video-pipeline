@@ -1,0 +1,26 @@
+{
+  "source": "user-supplied narration with emotion tags; captions are the clean text without tags",
+  "audio_file": "narration-v2.wav",
+  "facts": [
+    "مقابر العمال جنب أهرامات الجيزة أثبتت إن البناة كانوا مصريين مأجورين ليهم أكل وراتب ورعاية طبية، مش عبيد.",
+    "الاعتماد كان على منظومة هنداسية: زحافات خشبية، ترطيب الرمل بالمية، ومنحدرات ترابية مائلة، مش الرفع بالحبال بس."
+  ],
+  "scenes": [
+    {
+      "text": "فكرة إن الأهرامات اتبنت بالعبيد دي أسطورة مش هي الحقيقة. اللي لقوه علماء الآثار جنب أهرامات الجيزة مقابر وقرى للعمال، يعني اللي بنوها كانوا مصريين مأجورين، ليهم أكل وراتب ورعاية طبية. الموضوع ما كانش عقاب، كان مشروع منظم شارك فيه مهندسون وعمال مهرة.",
+      "image_prompt": "Photorealistic documentary photograph of the Giza pyramid complex at golden hour, ancient stone blocks and excavated workers' village remains in the foreground, natural light, 35mm lens, high detail, no text inside image"
+    },
+    {
+      "text": "قبل أكتر من أربعة آلاف وخمسمية سنة، كان المصريين القدماء بيفكروا في الخلود. بنوا الأهرامات كقبور للفراعنة، وأكبرها هرم خوفو في الجيزة. عشان يوصلوا للشكل ده، احتاجوا تخطيط دقيق جداً ومسح للمكان، وحساب دقيق للزاوية والاتجاه قبل ما يبدأوا البناء.",
+      "image_prompt": "Photorealistic documentary photograph of an ancient Egyptian surveyor aligning a massive limestone block at the base of a pyramid, simple measuring tools and papyrus plan nearby, warm desert sunlight, 35mm lens, high detail, no text inside image"
+    },
+    {
+      "text": "الحجارة الضخمة ما كانتش بتترفع بالحبال وبس. العمال كانوا بيحطوها على زحافات خشبية كبيرة، ويرشوا مية قدامها على الرمل. المية دي كانت بتقلل الاحتكاك، فتتحرك الحجارة بسهولة أكبر. وبعدين كانوا بيجروها على منحدرات ترابية مائلة عشان يطلعوها لفوق.",
+      "image_prompt": "Photorealistic documentary photograph of ancient Egyptian workers pulling a huge limestone block on a wooden sledge across damp sand, another worker pouring water ahead of it, natural desert light, 35mm lens, high detail, no text inside image"
+    },
+    {
+      "text": "المنحدرات دي كانت بتتبنى من الطين والرمل، وكل ما الهرم يعلو كانوا يطولوها ويعدلو ميلها. يعني اللي حصل مش سحر ولا أسطورة، ده تفكير هندسي وصبر وتنظيم شغل. الأهرامات لسه لحد دلوقتي بتقولنا إن المصري القديم كان عارف يفكر ويخطط ويبني.",
+      "image_prompt": "Photorealistic documentary photograph of a long mudbrick ramp alongside a rising pyramid, workers hauling stone blocks upward, dusty afternoon light, wide documentary composition, 35mm lens, high detail, no text inside image"
+    }
+  ]
+}
