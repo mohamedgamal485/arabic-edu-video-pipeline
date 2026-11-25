@@ -1,0 +1,35 @@
+name: Smoke test render
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check cloud tools
+        run: |
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Render 5-second test MP4
+        run: |
+          mkdir -p out
+          ffmpeg -y -f lavfi -i "testsrc2=size=1280x720:rate=25:duration=5" \
+            -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart \
+            out/smoke.mp4
+
+      - name: Verify output
+        run: ffprobe -v error -show_entries format=duration,size -of default=nw=1 out/smoke.mp4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-mp4
+          path: out/smoke.mp4
+          retention-days: 1
