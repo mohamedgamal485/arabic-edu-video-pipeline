@@ -202,8 +202,9 @@ jobs:
           [ "$(jq -r '.success // false' asr_resp.json)" = "true" ] || { cat asr_resp.json; exit 1; }
           jq '.result' asr_resp.json > asr_result.json
 
-          python3 - <<'PY'
-          import json, re
+          raw_duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          RAW_DURATION="$raw_duration" python3 - <<'PY'
+          import json, os, re
           from pathlib import Path
           result = json.loads(Path("asr_result.json").read_text(encoding="utf-8"))
           segments = result.get("segments") or []
@@ -219,8 +220,6 @@ jobs:
                   s, e = seg.get("start"), seg.get("end")
                   if s is not None and e is not None:
                       words.append((float(s), float(e), str(seg.get("text", ""))))
-          if not words:
-              raise SystemExit("No word timings from Whisper")
           def norm(text):
               text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", str(text))
               text = re.sub(r"[^\w\u0600-\u06FF\s]", " ", text)
@@ -230,47 +229,74 @@ jobs:
           total_tokens = sum(len(t) for t in token_sets)
           if total_tokens == 0:
               raise SystemExit("No scene tokens to align")
-          boundaries = []
-          cum = 0
-          n = len(words)
-          for tokens in token_sets:
-              i0 = int(round(cum / total_tokens * n))
-              cum += len(tokens)
-              i1 = int(round(cum / total_tokens * n))
-              i0 = max(0, min(i0, n - 1))
-              i1 = max(i0 + 1, min(i1, n))
-              boundaries.append([words[i0][0], words[i1 - 1][1]])
+          raw_duration = float(os.environ.get("RAW_DURATION", "0"))
+          if len(words) < len(token_sets):
+              if raw_duration <= 0:
+                  raise SystemExit("Not enough Whisper timings and no audio duration")
+              boundaries = []
+              cum = 0
+              for tokens in token_sets:
+                  start = raw_duration * cum / total_tokens
+                  cum += len(tokens)
+                  end = raw_duration * cum / total_tokens
+                  boundaries.append([start, end])
+              source = "token proportions"
+          else:
+              boundaries = []
+              cum = 0
+              n = len(words)
+              for tokens in token_sets:
+                  i0 = int(round(cum / total_tokens * n))
+                  cum += len(tokens)
+                  i1 = int(round(cum / total_tokens * n))
+                  i0 = max(0, min(i0, n - 1))
+                  i1 = max(i0 + 1, min(i1, n))
+                  boundaries.append([words[i0][0], words[i1 - 1][1]])
+              source = "Whisper timings"
           Path("boundaries.json").write_text(json.dumps(boundaries, ensure_ascii=False), encoding="utf-8")
-          print(f"Whisper words={n} scenes={len(boundaries)}")
+          print(f"Boundary source={source} units={len(words)} scenes={len(boundaries)} raw_duration={raw_duration:.2f}")
           PY
 
           total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
           lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
           hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
           factor=$(awk -v t="$TARGET" -v d="$total" 'BEGIN {printf "%.6f", t/d}')
-          if awk -v f="$factor" 'BEGIN { exit !(f < 0.5 || f > 2.0) }'; then
-            echo "ABORT: duration factor $factor outside atempo range"
+          if awk -v f="$factor" 'BEGIN { exit !(f >= 0.25 && f <= 4.0) }'; then
+            echo "ABORT: duration factor $factor outside supported range"
             exit 1
           fi
+          if awk -v f="$factor" 'BEGIN { exit !(f >= 0.5 && f <= 2.0) }'; then
+            filter="atempo=$factor"
+          else
+            root=$(awk -v f="$factor" 'BEGIN {printf "%.6f", sqrt(f)}')
+            filter="atempo=$root,atempo=$root"
+          fi
           echo "$factor" > factor.txt
-          echo "Raw duration=$total target=$TARGET range=[$lo,$hi] factor=$factor"
-          ffmpeg -y -i out/narration.wav -filter:a "atempo=$factor" out/narration_fit.wav
+          echo "$filter" > tempo_filter.txt
+          echo "Raw duration=$total target=$TARGET range=[$lo,$hi] factor=$factor filter=$filter"
+          ffmpeg -y -i out/narration.wav -filter:a "$filter" out/narration_fit.wav
           mv out/narration_fit.wav out/narration.wav
 
-          python3 - <<'PY'
-          import json
+          final_total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
+          FINAL_TOTAL="$final_total" python3 - <<'PY'
+          import json, os
           from pathlib import Path
           factor = float(Path("factor.txt").read_text(encoding="utf-8").strip())
+          total = float(os.environ["FINAL_TOTAL"])
           boundaries = json.loads(Path("boundaries.json").read_text(encoding="utf-8"))
           base = boundaries[0][0] if boundaries else 0.0
           scaled = []
+          for start, end in boundaries:
+              s2 = max(0.0, (start - base) / factor)
+              e2 = max(s2 + 0.1, (end - base) / factor)
+              scaled.append([s2, e2])
+          if scaled:
+              scaled[-1][1] = max(total, scaled[-1][0] + 0.1)
           with open("durations.txt", "w", encoding="utf-8") as f:
-              for start, end in boundaries:
-                  s2 = max(0.0, (start - base) / factor)
-                  e2 = max(s2 + 0.1, (end - base) / factor)
-                  scaled.append([s2, e2])
-                  f.write(f"{e2 - s2:.6f}\n")
+              for start, end in scaled:
+                  f.write(f"{end - start:.6f}\n")
           Path("boundaries.json").write_text(json.dumps(scaled, ensure_ascii=False), encoding="utf-8")
+          print(f"Scene durations sum={sum(e - s for s, e in scaled):.2f} audio={total:.2f}")
           PY
 
           final_total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
