@@ -49,132 +49,23 @@ jobs:
             fi
           done
 
-      - name: Choose free Gemini text model
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      - name: Load supplied storyboard and narration
         run: |
           mkdir -p out
-          code=$(curl -sS -o models.json -w "%{http_code}" \
-            -H "x-goog-api-key: $GEMINI_API_KEY" \
-            "https://generativelanguage.googleapis.com/v1beta/models")
-          [ "$code" = "200" ] || { cat models.json; exit 1; }
-          : > text_models.txt
-          for m in gemini-4-hydrogen gemini-3.6-flash gemini-3.5-flash-lite gemini-3.8-flash gemini-flash-latest; do
-            if jq -e --arg m "models/$m" \
-              '.models[]? | select(.name==$m)' \
-              models.json >/dev/null; then
-              echo "$m" >> text_models.txt
-            fi
-          done
-          if [ ! -s text_models.txt ]; then
-            echo "No allowed free text model found"
-            jq -r '.models[]?.name' models.json | head -n 40
-            exit 1
-          fi
-          echo "Text models available:"
-          cat text_models.txt
-
-      - name: Research and write Egyptian script
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TOPIC: ${{ github.event.inputs.topic }}
-          SCENES: ${{ github.event.inputs.scenes }}
-          TARGET: ${{ github.event.inputs.target_seconds }}
-        run: |
-          for v in SCENES TARGET; do
-            eval "val=\$$v"
-            case "$val" in ''|*[!0-9]*) echo "ABORT: $v must be an integer"; exit 1 ;; esac
-          done
-          if [ "$SCENES" -lt 2 ] || [ "$SCENES" -gt 4 ]; then
+          [ -s storyboard-v2.json ] || { echo "ABORT: missing storyboard-v2.json"; exit 1; }
+          [ -s narration-v2.wav ] || { echo "ABORT: missing narration-v2.wav"; exit 1; }
+          cp storyboard-v2.json storyboard.json
+          cp narration-v2.wav out/narration.wav
+          echo "user-supplied-script-with-emotion-tags" > used_text_model.txt
+          n=$(jq '.scenes | length' storyboard.json)
+          if [ "$n" -lt 2 ] || [ "$n" -gt 4 ]; then
             echo "ABORT: scenes must be between 2 and 4"
             exit 1
           fi
-          if [ "$TARGET" -lt 45 ] || [ "$TARGET" -gt 180 ]; then
-            echo "ABORT: target_seconds must be between 45 and 180"
-            exit 1
-          fi
-          PER_SCENE=$((TARGET / SCENES))
-          prompt="أنت كاتب محتوى تعليمي مصري. ابحث في معلوماتك عن الموضوع ده: $TOPIC. اكتب نصًا مصريًا طبيعيًا، جمل قصيرة، من غير فصحى تقيلة، ومن غير أي موسيقى أو غناء. المطلوب JSON فقط بالشكل ده: {\"facts\":[\"حقيقة مختصرة\",\"حقيقة مختصرة\"],\"scenes\":[{\"text\":\"نص المشهد\",\"image_prompt\":\"English photorealistic documentary image prompt, no text inside image\"}]}. عدد المشاهد لازم يكون $SCENES بالظبط. إجمالي النص لازم يقرأ في حوالي $TARGET ثانية، يعني متوسط $PER_SCENE ثانية لكل مشهد؛ اكتب جمل كافية عشان توصل للمدة دي من غير حشو. وصف كل صورة لازم يكون بالإنجليزية بس وبأسلوب صورة فوتوغرافية وثائقية واقعية عالية التفاصيل: photorealistic documentary photograph, real historical location or artifact, natural light, 35mm lens, no cartoon, no illustration, no painting, no text inside image."
-          ok=0
-          while IFS= read -r model; do
-            [ -n "$model" ] || continue
-            jq -n --arg model "$model" --arg prompt "$prompt" \
-              '{model:$model,input:[{type:"user_input",content:[{type:"text",text:$prompt}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{facts:{type:"array",items:{type:"string"}},scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["facts","scenes"]}},store:false}' \
-              > script_request.json
-            attempt=1
-            while [ "$attempt" -le 2 ]; do
-              code=$(curl -sS -o script_response.json -w "%{http_code}" \
-                -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
-                -H "x-goog-api-key: $GEMINI_API_KEY" \
-                -H "Content-Type: application/json" \
-                -H "Api-Revision: 2026-05-20" \
-                -d @script_request.json)
-              echo "Script model=$model HTTP=$code (attempt $attempt)"
-              [ "$code" = "200" ] && { ok=1; break; }
-              if [ "$attempt" -lt 2 ]; then sleep 10; fi
-              attempt=$((attempt + 1))
-            done
-            [ "$ok" = "1" ] && break
-          done < text_models.txt
-          [ "$ok" = "1" ] || { cat script_response.json; exit 1; }
-          echo "$model" > used_text_model.txt
-          text=$(jq -r '.output_text // ""' script_response.json)
-          if [ -z "$text" ]; then
-            text=$(jq -r '[.steps[]? | select(.type=="model_output") | .content[]? | select(.type=="text")] | last | .text // ""' script_response.json)
-          fi
-          printf '%s' "$text" > script_raw.json
-          SCENES="$SCENES" python3 - <<'PY'
-          import json, os, re
-          from pathlib import Path
-          raw = Path("script_raw.json").read_text(encoding="utf-8")
-          match = re.search(r"\{.*\}", raw, re.S)
-          if not match:
-              raise SystemExit("No JSON object in model output")
-          story = json.loads(match.group(0))
-          scenes = story.get("scenes") or []
-          want = int(os.environ["SCENES"])
-          if not scenes:
-              raise SystemExit("No scenes in model output")
-          if len(scenes) != want:
-              print(f"Warning: model returned {len(scenes)} scenes, expected {want}")
-              scenes = scenes[:want]
-          story["scenes"] = scenes
-          Path("storyboard.json").write_text(json.dumps(story, ensure_ascii=False), encoding="utf-8")
-          PY
-          echo "Text model used: $(cat used_text_model.txt)"
-          echo "Scenes: $(jq '.scenes | length' storyboard.json)"
-          jq -r '.facts[]' storyboard.json
-
-      - name: Generate Egyptian Arabic narration
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          combined=$(jq -r '[.scenes[].text] | join(" ")' storyboard.json)
-          [ -n "$combined" ] || { echo "ABORT: empty script"; exit 1; }
-          printf '%s' "$combined" > combined_script.txt
-          jq -n --arg text "$combined" \
-            '{model:"gemini-3.8-flash-tts",input:[{type:"user_input",content:[{type:"text",text:$text,annotations:[{type:"speech_metadata",style:"warm, friendly, casual Egyptian storytelling"}]}]}],response_format:{type:"audio"},generation_config:{speech_config:[{voice:"ar-eg-tutor-5"}]}}' \
-            > tts_req.json
-          ok=0
-          attempt=1
-          while [ "$attempt" -le 4 ]; do
-            code=$(curl -sS -o tts_resp.json -w "%{http_code}" \
-              -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
-              -H "x-goog-api-key: $GEMINI_API_KEY" \
-              -H "Content-Type: application/json" \
-              -H "Api-Revision: 2026-05-20" \
-              -d @tts_req.json)
-            echo "TTS HTTP=$code (attempt $attempt)"
-            [ "$code" = "200" ] && { ok=1; break; }
-            if [ "$attempt" -lt 4 ]; then sleep $((attempt * 8)); fi
-            attempt=$((attempt + 1))
-          done
-          [ "$ok" = "1" ] || { cat tts_resp.json; exit 1; }
-          jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data' tts_resp.json | base64 --decode > out/narration.wav
+          dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
           size=$(stat -c%s out/narration.wav)
-          [ "$size" -gt 100000 ] || { echo "FAIL: narration too small"; exit 1; }
-          duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
-          echo "TTS OK: one request, size=$size duration=$duration voice=ar-eg-tutor-5"
+          echo "Supplied narration OK: scenes=$n duration=$dur size=$size voice=ar-eg-tutor-5"
+
       - name: Align narration with Whisper and fit target duration
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -260,16 +151,22 @@ jobs:
           total=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/narration.wav)
           lo=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*0.85}')
           hi=$(awk -v t="$TARGET" 'BEGIN {printf "%.2f", t*1.15}')
-          factor=$(awk -v t="$TARGET" -v d="$total" 'BEGIN {printf "%.6f", t/d}')
-          if awk -v f="$factor" 'BEGIN { exit !(f >= 0.25 && f <= 4.0) }'; then
-            echo "ABORT: duration factor $factor outside supported range"
-            exit 1
-          fi
-          if awk -v f="$factor" 'BEGIN { exit !(f >= 0.5 && f <= 2.0) }'; then
-            filter="atempo=$factor"
+          if awk -v d="$total" -v lo="$lo" -v hi="$hi" 'BEGIN { exit !(d >= lo && d <= hi) }'; then
+            factor="1.000000"
+            filter="anull"
+            echo "Duration already inside range; keeping original performance"
           else
-            root=$(awk -v f="$factor" 'BEGIN {printf "%.6f", sqrt(f)}')
-            filter="atempo=$root,atempo=$root"
+            factor=$(awk -v t="$TARGET" -v d="$total" 'BEGIN {printf "%.6f", t/d}')
+            if awk -v f="$factor" 'BEGIN { exit !(f >= 0.25 && f <= 4.0) }'; then
+              echo "ABORT: duration factor $factor outside supported range"
+              exit 1
+            fi
+            if awk -v f="$factor" 'BEGIN { exit !(f >= 0.5 && f <= 2.0) }'; then
+              filter="atempo=$factor"
+            else
+              root=$(awk -v f="$factor" 'BEGIN {printf "%.6f", sqrt(f)}')
+              filter="atempo=$root,atempo=$root"
+            fi
           fi
           echo "$factor" > factor.txt
           echo "$filter" > tempo_filter.txt
@@ -346,7 +243,8 @@ jobs:
               s = sec % 60
               return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
           def clean_caption(text):
-              text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", str(text))
+              text = re.sub(r"<[^>]+>", "", str(text))
+              text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", text)
               text = text.replace("\u200e", "").replace("\u200f", "")
               return text.strip()
           lines = []
@@ -407,5 +305,6 @@ jobs:
             out/used_text_model.txt
             out/target_seconds.txt
           retention-days: 1
+
 
 
