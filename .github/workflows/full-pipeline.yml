@@ -80,13 +80,19 @@ jobs:
           jq -n --arg model "$model" --arg prompt "$prompt" \
             '{model:$model,input:[{type:"user_input",content:[{type:"text",text:$prompt}]}],response_format:{type:"text",mime_type:"application/json",schema:{type:"object",properties:{facts:{type:"array",items:{type:"string"}},scenes:{type:"array",items:{type:"object",properties:{text:{type:"string"},image_prompt:{type:"string"}},required:["text","image_prompt"]}}},required:["facts","scenes"]}}}' \
             > script_request.json
-          code=$(curl -sS -o script_response.json -w "%{http_code}" \
-            -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
-            -H "x-goog-api-key: $GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -H "Api-Revision: 2026-05-20" \
-            -d @script_request.json)
-          echo "Script HTTP: $code"
+          attempt=1
+          while [ "$attempt" -le 5 ]; do
+            code=$(curl -sS -o script_response.json -w "%{http_code}" \
+              -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+              -H "x-goog-api-key: $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Api-Revision: 2026-05-20" \
+              -d @script_request.json)
+            echo "Script HTTP: $code (attempt $attempt)"
+            [ "$code" = "200" ] && break
+            if [ "$attempt" -lt 5 ]; then sleep $((attempt * 15)); fi
+            attempt=$((attempt + 1))
+          done
           [ "$code" = "200" ] || { cat script_response.json; exit 1; }
           jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="text")] | last | .text // empty' script_response.json > script_raw.json
           jq -e 'select(.scenes and (.scenes | length > 0))' script_raw.json > storyboard.json 2>/dev/null || {
