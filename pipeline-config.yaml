@@ -16,31 +16,32 @@ modes:
 
 services:
   text: "gemini-4-hydrogen / gemini-3.6-flash / gemini-3.5-flash-lite (free tier, automatic fallback)"
-  tts: "gemini-3.8-flash-tts (ar-eg-tutor-5, user-confirmed, free tier)"
+  tts: "gemini-3.8-flash-tts (ar-eg-tutor-5, user-confirmed, free tier, 10 requests/day confirmed by API)"
   images: "cloudflare-workers-ai @cf/black-forest-labs/flux-1-schnell (steps=8, photorealistic documentary prompts)"
-  asr: "cloudflare-whisper-large-v3-turbo (preferred), groq-whisper (free fallback)"
+  asr: "cloudflare-workers-ai @cf/openai/whisper-large-v3-turbo (word timings used for SRT and scene boundaries)"
   stock: ["pexels", "pixabay", "wikimedia-commons"]
   render: "github-actions ubuntu-latest + ffmpeg"
   storage: "github-actions-artifacts (temporary, deleted after local download)"
   secrets_store: "github-actions-secrets"
 
 preflight:
-  cloudflare_neuron_budget_per_video: 7000
-  gemini_tts_requests_per_video: 3
-  tts_requests_are_per_scene: true
-  max_tts_requests_per_video: 10
+  cloudflare_neuron_budget_per_video: 600
+  gemini_tts_requests_per_video: 1
+  tts_requests_are_per_scene: false
+  gemini_tts_daily_limit_confirmed: 10
+  cloudflare_whisper_neurons_per_minute: 46.63
   target_seconds_default: 90
   target_seconds_range: [45, 180]
   duration_tolerance_percent: 15
-  max_videos_per_run: 4
+  max_videos_per_run: 10
   abort_if_unknown_quota: true
   no_paid_fallback: true
   spend_limit_usd: 0
 
 qc:
   auto_fix_and_recheck: true
-  checks: ["script_structure", "srt_timing", "ffprobe_duration_size_audio_video"]
-  planned_checks: ["script_vs_transcript", "frame_sampling", "license_log"]
+  checks: ["script_structure", "srt_timing_from_whisper", "clean_arabic_captions", "ffprobe_duration_size_audio_video"]
+  planned_checks: ["frame_sampling", "license_log"]
   human_sample_when_subjective: true
 
 delivery:
