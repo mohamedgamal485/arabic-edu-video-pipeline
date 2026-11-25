@@ -1,0 +1,62 @@
+name: Egyptian voice audition
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audition:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || { sudo apt-get update -qq; sudo apt-get install -y -qq jq; }
+
+      - name: Generate 3 Egyptian voice samples
+        env:
+          GEMINI_API_KEY: \${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p out
+          cat > base.json <<'JSON'
+          {
+            "model": "gemini-3.8-flash-tts",
+            "input": [{
+              "type": "user_input",
+              "content": [{
+                "type": "text",
+                "text": "الأهرامات من أهم المعالم في مصر، وبيزورها آلاف الناس كل سنة.",
+                "annotations": [{
+                  "type": "speech_metadata",
+                  "style": "warm and friendly, casual storytelling"
+                }]
+              }]
+            }],
+            "response_format": { "type": "audio" },
+            "generation_config": { "speech_config": [ { "voice": "__VOICE__" } ] }
+          }
+          JSON
+          for v in ar-eg-tutor-5 ar-eg-assistant-1 ar-eg-advisor-11; do
+            sed "s/__VOICE__/$v/" base.json > req.json
+            code=$(curl -sS -o resp.json -w "%{http_code}" \
+              -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" \
+              -H "x-goog-api-key: $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d @req.json)
+            echo "$v HTTP: $code"
+            if [ "$code" = "200" ]; then
+              jq -r '[.steps[] | select(.type=="model_output") | .content[] | select(.type=="audio")] | last | .data' resp.json | base64 --decode > "out/$v.wav"
+            else
+              cat resp.json
+            fi
+          done
+          ls -lh out
+
+      - name: Upload samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: egyptian-voices
+          path: out/*.wav
+          retention-days: 1
