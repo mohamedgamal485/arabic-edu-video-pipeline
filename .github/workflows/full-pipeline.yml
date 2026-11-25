@@ -53,9 +53,20 @@ jobs:
         run: |
           mkdir -p out
           [ -s storyboard-v2.json ] || { echo "ABORT: missing storyboard-v2.json"; exit 1; }
-          [ -s narration-v2.wav ] || { echo "ABORT: missing narration-v2.wav"; exit 1; }
+          if [ -s narration-v2.wav ]; then
+            echo "Using direct WAV upload"
+            cp narration-v2.wav out/narration.wav
+          else
+            parts=$(ls narration-v2.b64.part*.txt 2>/dev/null | wc -l)
+            if [ "$parts" -lt 1 ]; then
+              echo "ABORT: missing narration-v2.wav and narration-v2.b64 parts"
+              exit 1
+            fi
+            echo "Reassembling narration from $parts base64 parts"
+            cat narration-v2.b64.part*.txt | tr -d '\r\n ' | base64 -d > out/narration.wav
+          fi
+          [ -s out/narration.wav ] || { echo "ABORT: narration decode failed"; exit 1; }
           cp storyboard-v2.json storyboard.json
-          cp narration-v2.wav out/narration.wav
           echo "user-supplied-script-with-emotion-tags" > used_text_model.txt
           n=$(jq '.scenes | length' storyboard.json)
           if [ "$n" -lt 2 ] || [ "$n" -gt 4 ]; then
@@ -74,8 +85,13 @@ jobs:
         run: |
           case "$TARGET" in ''|*[!0-9]*) echo "ABORT: target_seconds must be an integer"; exit 1 ;; esac
           [ -s out/narration.wav ] || { echo "ABORT: missing narration"; exit 1; }
-          jq -n --arg audio "$(base64 -w0 out/narration.wav)" \
-            '{audio:$audio,task:"transcribe",language:"ar",vad_filter:true}' > asr_req.json
+          python3 - <<'PY'
+          import base64, json
+          from pathlib import Path
+          audio = base64.b64encode(Path("out/narration.wav").read_bytes()).decode("ascii")
+          Path("asr_req.json").write_text(json.dumps({"audio": audio, "task": "transcribe", "language": "ar", "vad_filter": True}), encoding="utf-8")
+          print(f"ASR request built: {len(audio)} base64 chars")
+          PY
           ok=0
           attempt=1
           while [ "$attempt" -le 3 ]; do
